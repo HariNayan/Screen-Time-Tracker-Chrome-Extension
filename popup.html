@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Site Time Tracker</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="header-left">
+        <h1>Site Time Tracker</h1>
+        <div class="toggle-group">
+          <button id="btn-today" class="toggle-btn active">Today</button>
+          <button id="btn-week" class="toggle-btn">This Week</button>
+        </div>
+      </div>
+      <button id="theme-toggle" class="theme-toggle" title="Toggle dark mode">🌙</button>
+    </header>
+
+    <div id="stats" class="stats">
+      <div class="stat-item">
+        <span class="stat-label">Total Time</span>
+        <span id="total-time" class="stat-value">0m</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-label">Sites Visited</span>
+        <span id="site-count" class="stat-value">0</span>
+      </div>
+    </div>
+    <p id="date-range" class="date-range"></p>
+
+    <div id="domain-list" class="domain-list">
+      <p class="empty-state">No data yet. Start browsing!</p>
+    </div>
+
+    <footer>
+      <button id="btn-export" class="footer-btn">Export Data</button>
+      <button id="btn-clear" class="footer-btn danger">Clear All Data</button>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
