@@ -137,3 +137,6 @@ node test.js
 ```
 
 Tests mock the `chrome.*` APIs and verify session handling, checkpoint splitting, data persistence, and pruning logic.
+```
+Build by Harinayan 🤖
+
