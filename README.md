@@ -1,4 +1,4 @@
-# Site Time Tracker
+# Screen Time Tracker
 
 Chrome extension that tracks how much time you spend on each website. Data stays on your machine — no accounts, no servers, no network requests.
 
@@ -95,7 +95,7 @@ Internal Chrome pages are skipped: `chrome://`, `about:`, `new-tab-page:`. Tabs 
 
 ```
 ┌──────────────────────────────┐
-│ Site Time Tracker    [🌙]    │  ← theme toggle
+│ Screen Time Tracker    [🌙]    │  ← theme toggle
 │ [Today] [This Week]          │  ← view switcher
 ├──────────────────────────────┤
 │ Total Time    Sites Visited  │

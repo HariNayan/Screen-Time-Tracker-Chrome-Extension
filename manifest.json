@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Site Time Tracker",
+  "name": "Screen Time Tracker",
   "version": "1.0.0",
   "description": "A privacy-first Chrome extension that tracks time spent per domain using only local storage, with zero network calls.",
   "permissions": [
