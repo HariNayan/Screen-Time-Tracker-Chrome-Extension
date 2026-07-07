@@ -312,3 +312,10 @@ footer {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-muted);
 }
+
+.built-by {
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 12px;
+}
