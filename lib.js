@@ -124,6 +124,17 @@ export function toCsv(usageData) {
   return rows.map((row) => row.map(csvEscape).join(',')).join('\r\n') + '\r\n';
 }
 
+// log: array of [startMs, durationMs, domain] session entries
+export function computeVisits(log) {
+  const visits = {};
+  for (const [, duration, domain] of log) {
+    const v = visits[domain] || (visits[domain] = { count: 0, totalMs: 0 });
+    v.count++;
+    v.totalMs += duration;
+  }
+  return visits;
+}
+
 const DATED_KEY_RE = /^(?:usage|sessions):(\d{4}-\d{2}-\d{2})$/;
 
 export function getPruneKeys(keys, retentionDays, today = new Date()) {

@@ -1,5 +1,5 @@
-import { getDay as getDayKey, formatTime, escapeHtml, groupByBaseDomain, getBaseDomain, domainHue, toCsv } from './lib.js';
-import { SLEEP_CAP_MS } from './session.js';
+import { getDay as getDayKey, formatTime, escapeHtml, groupByBaseDomain, getBaseDomain, domainHue, computeVisits, toCsv } from './lib.js';
+import { SLEEP_CAP_MS, appendToLog } from './session.js';
 
 let currentView = 'today';
 let refreshTimeout = null;
@@ -98,9 +98,27 @@ function getLiveDomain(currentSession, settings) {
   return settings.groupSubdomains ? getBaseDomain(currentSession.domain) : currentSession.domain;
 }
 
+// Today's session log with the in-progress session appended (coalesced via
+// the same rule the background uses) and domains optionally grouped.
+function buildDisplayLog(result, settings, todayKey) {
+  const log = (result[`sessions:${todayKey}`] || []).map((entry) => [...entry]);
+
+  const cs = result.currentSession;
+  if (cs && cs.domain) {
+    const elapsed = Date.now() - cs.startTime;
+    if (elapsed > 0 && elapsed <= SLEEP_CAP_MS && getDayKey(new Date(cs.startTime)) === todayKey) {
+      appendToLog(log, { domain: cs.domain, startTime: cs.startTime, duration: elapsed });
+    }
+  }
+
+  if (!settings.groupSubdomains) return log;
+  return log.map(([start, duration, domain]) => [start, duration, getBaseDomain(domain)]);
+}
+
 async function getData() {
   const days = currentView === 'today' ? [getDayKey(new Date())] : getLast7Days();
   const keys = days.map((day) => `usage:${day}`).concat(['currentSession', 'settings']);
+  if (currentView === 'today') keys.push(`sessions:${days[0]}`);
 
   return new Promise((resolve, reject) => {
     chrome.storage.local.get(keys, (result) => {
@@ -118,7 +136,12 @@ async function getData() {
       };
 
       if (currentView === 'today') {
-        resolve({ type: 'single', data: transform(result[`usage:${days[0]}`] || {}, days[0]), liveDomain });
+        resolve({
+          type: 'single',
+          data: transform(result[`usage:${days[0]}`] || {}, days[0]),
+          log: buildDisplayLog(result, settings, days[0]),
+          liveDomain
+        });
       } else {
         const weekData = {};
         for (const day of days) {
@@ -210,13 +233,20 @@ function bindFaviconFallbacks(root) {
   });
 }
 
-function renderDomainItems(entries, maxTime, dayTotal, liveDomain) {
+function renderDomainItems(entries, maxTime, dayTotal, liveDomain, visits) {
   return entries
     .map(([domain, time]) => {
       const barPercent = maxTime > 0 ? (time / maxTime) * 100 : 0;
       const share = dayTotal > 0 ? Math.round((time / dayTotal) * 100) : 0;
       const isLive = domain === liveDomain;
-      const tooltip = `${escapeHtml(domain)} — ${share}% of this day${isLive ? ' · tracking now' : ''}`;
+      const v = visits && visits[domain];
+      const visitText = v && v.count > 0
+        ? `${v.count} visit${v.count === 1 ? '' : 's'}`
+        : '';
+      const visitTooltip = v && v.count > 0
+        ? ` · ${visitText} · avg ${formatTime(v.totalMs / v.count)}`
+        : '';
+      const tooltip = `${escapeHtml(domain)} — ${share}% of this day${visitTooltip}${isLive ? ' · tracking now' : ''}`;
       return `
         <div class="domain-item" title="${tooltip}">
           ${iconHtml(domain)}
@@ -226,11 +256,46 @@ function renderDomainItems(entries, maxTime, dayTotal, liveDomain) {
               <div class="domain-bar" style="width: ${barPercent}%"></div>
             </div>
           </div>
-          <div class="domain-time">${formatTime(time)}</div>
+          <div class="domain-side">
+            <div class="domain-time">${formatTime(time)}</div>
+            ${visitText ? `<div class="domain-visits">${visitText}</div>` : ''}
+          </div>
         </div>
       `;
     })
     .join('');
+}
+
+function formatClock(ms) {
+  return new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+const HOUR_MS = 3600000;
+
+function renderTimeline(log, topColors) {
+  if (log.length === 0) return '';
+
+  const axisStart = Math.floor(log[0][0] / HOUR_MS) * HOUR_MS;
+  const lastEnd = log.reduce((max, [start, duration]) => Math.max(max, start + duration), 0);
+  const axisEnd = Math.max(Math.ceil(lastEnd / HOUR_MS) * HOUR_MS, axisStart + HOUR_MS);
+  const span = axisEnd - axisStart;
+
+  const blocks = log
+    .map(([start, duration, domain]) => {
+      const left = ((start - axisStart) / span) * 100;
+      const width = Math.max((duration / span) * 100, 0.6);
+      const color = topColors.get(domain) || 'var(--cat-other)';
+      const tooltip = `${escapeHtml(domain)} · ${formatClock(start)}–${formatClock(start + duration)} · ${formatTime(duration)}`;
+      return `<div class="tl-block" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%;background:${color}" title="${tooltip}"></div>`;
+    })
+    .join('');
+
+  return `
+    <div class="timeline">
+      <div class="tl-track">${blocks}</div>
+      <div class="tl-axis"><span>${formatClock(axisStart)}</span><span>${formatClock(axisEnd)}</span></div>
+    </div>
+  `;
 }
 
 const EMPTY_STATE_HTML =
@@ -309,7 +374,7 @@ function renderTopSites(data) {
   `);
 }
 
-function renderSingleDay(data, liveDomain) {
+function renderSingleDay(data, liveDomain, log) {
   const entries = Object.entries(data).sort((a, b) => b[1] - a[1]);
   const totalMs = entries.reduce((sum, [, time]) => sum + time, 0);
 
@@ -325,7 +390,15 @@ function renderSingleDay(data, liveDomain) {
     return;
   }
 
-  setHtml('domain-list', renderDomainItems(entries, entries[0][1], totalMs, liveDomain));
+  // Timeline blocks reuse the donut's colors so top sites read consistently
+  // across both charts.
+  const topColors = new Map(entries.slice(0, 5).map(([domain], i) => [domain, `var(--cat-${i + 1})`]));
+  const visits = computeVisits(log);
+
+  setHtml(
+    'domain-list',
+    renderTimeline(log, topColors) + renderDomainItems(entries, entries[0][1], totalMs, liveDomain, visits)
+  );
 }
 
 function renderWeekChart(days, weekData) {
@@ -412,7 +485,7 @@ async function refresh() {
   try {
     const result = await getData();
     if (result.type === 'single') {
-      renderSingleDay(result.data, result.liveDomain);
+      renderSingleDay(result.data, result.liveDomain, result.log);
     } else {
       renderWeekData(result.data, result.liveDomain);
     }
