@@ -1,70 +1,72 @@
-const { getDomain, getDay, formatTime, escapeHtml } = (() => {
-  function getDomain(url) {
-    const IGNORED_PREFIXES = ['chrome://', 'about:', 'new-tab-page:'];
-    try {
-      for (const prefix of IGNORED_PREFIXES) {
-        if (url.startsWith(prefix)) return null;
-      }
-      const hostname = new URL(url).hostname;
-      if (!hostname || hostname === '') return null;
-      return hostname;
-    } catch {
-      return null;
-    }
-  }
-
-  function getDay(date) {
-    const d = date || new Date();
-    const year = d.getFullYear();
-    const month = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
-  }
-
-  function formatTime(ms) {
-    const totalSeconds = Math.floor(ms / 1000);
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    if (hours > 0) return `${hours}h ${minutes}m`;
-    return `${minutes}m`;
-  }
-
-  function escapeHtml(str) {
-    return str
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#039;');
-  }
-
-  return { getDomain, getDay, formatTime, escapeHtml };
-})();
-
-const SLEEP_CAP_MS = 30 * 60 * 1000;
-const CHECKPOINT_INTERVAL_MS = 60 * 1000;
+import {
+  getDomain,
+  getDay,
+  formatTime,
+  escapeHtml,
+  getPruneKeys,
+  getBaseDomain,
+  groupByBaseDomain,
+  isExcluded,
+  domainHue,
+  toCsv
+} from './lib.js';
+import {
+  createSessionManager,
+  DEBOUNCE_MS,
+  SLEEP_CAP_MS,
+  CHECKPOINT_INTERVAL_MS
+} from './session.js';
 
 let passed = 0;
 let failed = 0;
 
 function assert(name, actual, expected) {
-  if (actual === expected) {
+  const ok = typeof expected === 'object'
+    ? JSON.stringify(actual) === JSON.stringify(expected)
+    : actual === expected;
+  if (ok) {
     console.log(`  PASS: ${name}`);
     passed++;
   } else {
-    console.log(`  FAIL: ${name} — got "${actual}", expected "${expected}"`);
+    console.log(`  FAIL: ${name} — got ${JSON.stringify(actual)}, expected ${JSON.stringify(expected)}`);
     failed++;
   }
 }
 
-function assertBool(name, actual, expected) {
-  if (actual === expected) {
-    console.log(`  PASS: ${name}`);
-    passed++;
-  } else {
-    console.log(`  FAIL: ${name} — got ${actual}, expected ${expected}`);
-    failed++;
-  }
+function createMockStorage() {
+  const store = {};
+  return {
+    _store: store,
+    async get(keys) {
+      if (keys === null) return structuredClone(store);
+      if (typeof keys === 'string') {
+        return keys in store ? { [keys]: structuredClone(store[keys]) } : {};
+      }
+      const result = {};
+      for (const k of keys) {
+        if (k in store) result[k] = structuredClone(store[k]);
+      }
+      return result;
+    },
+    async set(obj) {
+      Object.assign(store, structuredClone(obj));
+    },
+    async remove(keys) {
+      for (const k of [].concat(keys)) delete store[k];
+    }
+  };
+}
+
+function usageFor(storage, day) {
+  return storage._store[`usage:${day}`] || {};
+}
+
+// Fake clock: tests set `t` and the manager reads it through now().
+function createHarness(startTime) {
+  const clock = { t: startTime };
+  const storage = createMockStorage();
+  const manager = createSessionManager(storage, { now: () => clock.t });
+  return { clock, storage, manager };
 }
 
 console.log('\n=== getDomain() ===');
@@ -72,21 +74,26 @@ assert('normal URL', getDomain('https://www.google.com/search?q=test'), 'www.goo
 assert('subdomain', getDomain('https://mail.google.com'), 'mail.google.com');
 assert('no protocol', getDomain('http://example.com'), 'example.com');
 assert('chrome:// ignored', getDomain('chrome://settings'), null);
+assert('chrome-extension:// ignored', getDomain('chrome-extension://abcdefghijklmnop/page.html'), null);
+assert('edge:// ignored', getDomain('edge://settings'), null);
+assert('devtools:// ignored', getDomain('devtools://devtools/bundled/inspector.html'), null);
 assert('about: ignored', getDomain('about:blank'), null);
 assert('new-tab ignored', getDomain('new-tab-page:'), null);
 assert('empty URL', getDomain(''), null);
 assert('invalid URL', getDomain('not-a-url'), null);
+assert('file:// has no hostname', getDomain('file:///C:/docs/page.html'), null);
 
 console.log('\n=== getDay() ===');
 const now = new Date();
-const expected = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
-assert('returns local date', getDay(new Date()), expected);
+const expectedToday = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+assert('returns local date', getDay(new Date()), expectedToday);
 assert('handles midnight edge case', getDay(new Date(2024, 0, 1, 0, 0, 0)), '2024-01-01');
 assert('handles noon', getDay(new Date(2024, 11, 25, 12, 0, 0)), '2024-12-25');
 
 console.log('\n=== formatTime() ===');
-assert('0ms', formatTime(0), '0m');
-assert('30 seconds', formatTime(30000), '0m');
+assert('0ms', formatTime(0), '0s');
+assert('30 seconds', formatTime(30000), '30s');
+assert('59 seconds', formatTime(59999), '59s');
 assert('1 minute', formatTime(60000), '1m');
 assert('5 min 30 sec', formatTime(330000), '5m');
 assert('1 hour', formatTime(3600000), '1h 0m');
@@ -100,386 +107,254 @@ assert('quotes', escapeHtml('a"b'), 'a&quot;b');
 assert('ampersand', escapeHtml('a&b'), 'a&amp;b');
 assert('single quote', escapeHtml("a'b"), 'a&#039;b');
 
-console.log('\n=== Fix 1: Sleep/Shutdown Cap ===');
-const SHORT_GAP = 5 * 60 * 1000;
-const LONG_GAP = 4 * 60 * 60 * 1000;
-assertBool('5min gap below cap', SHORT_GAP <= SLEEP_CAP_MS, true);
-assertBool('4hr gap exceeds cap', LONG_GAP <= SLEEP_CAP_MS, false);
-assertBool('cap is 30 minutes', SLEEP_CAP_MS, 30 * 60 * 1000);
+console.log('\n=== getBaseDomain() ===');
+assert('www stripped', getBaseDomain('www.google.com'), 'google.com');
+assert('deep subdomain', getBaseDomain('a.b.mail.google.com'), 'google.com');
+assert('bare domain unchanged', getBaseDomain('google.com'), 'google.com');
+assert('two-part TLD kept', getBaseDomain('news.bbc.co.uk'), 'bbc.co.uk');
+assert('bare two-part TLD domain unchanged', getBaseDomain('bbc.co.uk'), 'bbc.co.uk');
+assert('localhost unchanged', getBaseDomain('localhost'), 'localhost');
+assert('IPv4 unchanged', getBaseDomain('192.168.1.100'), '192.168.1.100');
 
-const sessionShort = { startTime: Date.now() - SHORT_GAP, domain: 'google.com', tabId: 1 };
-const durationShort = Date.now() - sessionShort.startTime;
-assertBool('short gap duration computed', durationShort <= SLEEP_CAP_MS, true);
+console.log('\n=== groupByBaseDomain() ===');
+assert('merges subdomains', groupByBaseDomain({
+  'www.google.com': 1000,
+  'mail.google.com': 2000,
+  'github.com': 500
+}), { 'google.com': 3000, 'github.com': 500 });
 
-const sessionLong = { startTime: Date.now() - LONG_GAP, domain: 'google.com', tabId: 1 };
-const durationLong = Date.now() - sessionLong.startTime;
-assertBool('long gap duration exceeds cap', durationLong > SLEEP_CAP_MS, true);
+console.log('\n=== isExcluded() ===');
+assert('exact match', isExcluded('example.com', ['example.com']), true);
+assert('subdomain match', isExcluded('mail.example.com', ['example.com']), true);
+assert('no match', isExcluded('github.com', ['example.com']), false);
+assert('suffix is not subdomain', isExcluded('notexample.com', ['example.com']), false);
+assert('case insensitive', isExcluded('Example.COM', ['example.com']), true);
+assert('empty list', isExcluded('example.com', []), false);
+assert('null domain', isExcluded(null, ['example.com']), false);
+assert('missing list', isExcluded('example.com', undefined), false);
 
-console.log('\n=== Fix 2: Tab Close Handling ===');
-const mockSession = { domain: 'youtube.com', tabId: 42, startTime: Date.now() - 60000 };
-const closedTabId = 42;
-const otherTabId = 99;
-assertBool('closed tab matches session tab', closedTabId === mockSession.tabId, true);
-assertBool('other tab does not match', otherTabId === mockSession.tabId, false);
-
-let sessionFlushed = false;
-async function mockEndSession(sessionTabId) {
-  if (mockSession && mockSession.tabId === sessionTabId) {
-    sessionFlushed = true;
-  }
+console.log('\n=== domainHue() ===');
+assert('deterministic', domainHue('github.com'), domainHue('github.com'));
+{
+  const hues = ['github.com', 'youtube.com', 'stackoverflow.com', 'google.com']
+    .map(domainHue);
+  assert('all hues in 0-359', hues.every((h) => Number.isInteger(h) && h >= 0 && h < 360), true);
+  assert('different domains vary', new Set(hues).size > 1, true);
 }
-await mockEndSession(closedTabId);
-assertBool('session flushed on matching tab close', sessionFlushed, true);
 
-sessionFlushed = false;
-await mockEndSession(otherTabId);
-assertBool('session NOT flushed on non-matching tab close', sessionFlushed, false);
-
-console.log('\n=== Fix 3: Promise Chain Queue ===');
-let executionOrder = [];
-async function mockSwitch(id) {
-  return new Promise((resolve) => {
-    setTimeout(() => {
-      executionOrder.push(id);
-      resolve();
-    }, Math.random() * 20);
+console.log('\n=== toCsv() ===');
+{
+  const csv = toCsv({
+    'usage:2026-07-08': { 'b.com': 60000 },
+    'usage:2026-07-07': { 'a.com': 3600000, 'weird"domain,com': 1000 }
   });
+  const lines = csv.trim().split('\r\n');
+  assert('header row', lines[0], 'date,domain,milliseconds,duration');
+  assert('days sorted, domains by time desc', lines[1], '2026-07-07,a.com,3600000,1h 0m');
+  assert('special chars quoted', lines[2], '2026-07-07,"weird""domain,com",1000,1s');
+  assert('second day follows', lines[3], '2026-07-08,b.com,60000,1m');
+  assert('row count', lines.length, 4);
 }
 
-let chain = Promise.resolve();
-chain = chain.then(() => mockSwitch(1));
-chain = chain.then(() => mockSwitch(2));
-chain = chain.then(() => mockSwitch(3));
-await chain;
-assert('queue order preserved: 1,2,3', executionOrder.join(','), '1,2,3');
-
-executionOrder = [];
-chain = Promise.resolve();
-for (let i = 0; i < 5; i++) {
-  chain = chain.then(() => mockSwitch(i));
-}
-await chain;
-assert('5 rapid calls in order', executionOrder.join(','), '0,1,2,3,4');
-
-console.log('\n=== Fix 4: Timezone in pruneOldData ===');
-function parseBucketDate(dateStr) {
-  return new Date(dateStr + 'T00:00:00');
-}
-
-const testDateStr = '2026-07-07';
-const parsed = parseBucketDate(testDateStr);
-assertBool('parsed date is not NaN', isNaN(parsed.getTime()), false);
-assertBool('parsed hour is 0 (local)', parsed.getHours(), 0);
-assertBool('parsed minutes is 0', parsed.getMinutes(), 0);
-
-const utcParsed = new Date(testDateStr);
-const localParsed = parseBucketDate(testDateStr);
-assertBool('local parse differs from UTC parse',
-  utcParsed.getTime() !== localParsed.getTime() || utcParsed.getHours() === localParsed.getHours(),
-  true);
-
-const cutoff = new Date();
-cutoff.setDate(cutoff.getDate() - 90);
-cutoff.setHours(0, 0, 0, 0);
-const exactCutoffDay = new Date(cutoff);
-const bucketDate = parseBucketDate(getDay(exactCutoffDay));
-assertBool('exact cutoff day is not pruned', bucketDate >= cutoff, true);
-
-const dayBefore = new Date(exactCutoffDay);
-dayBefore.setDate(dayBefore.getDate() - 1);
-const bucketBefore = parseBucketDate(getDay(dayBefore));
-assertBool('day before cutoff is pruned', bucketBefore < cutoff, true);
-
-console.log('\n=== Checkpoint: 45-min session preserved ===');
-const SESSION_DURATION_MS = 45 * 60 * 1000;
-const NUM_CHUNKS = Math.ceil(SESSION_DURATION_MS / CHECKPOINT_INTERVAL_MS);
-const REMAINDER_MS = SESSION_DURATION_MS % CHECKPOINT_INTERVAL_MS;
-
-assertBool('45 min produces 45 chunks', NUM_CHUNKS, 45);
-assertBool('chunk interval is 1 min', CHECKPOINT_INTERVAL_MS, 60000);
-assertBool('remainder is 0', REMAINDER_MS, 0);
-
-const totalFromChunks = NUM_CHUNKS * CHECKPOINT_INTERVAL_MS;
-assertBool('chunks sum to 45 min', totalFromChunks, SESSION_DURATION_MS);
-assertBool('each chunk below sleep cap', CHECKPOINT_INTERVAL_MS <= SLEEP_CAP_MS, true);
-
-console.log('\n=== Checkpoint: Midnight crossing ===');
-const lateNight = new Date(2026, 6, 7, 23, 58, 0);
-const earlyMorning = new Date(2026, 6, 8, 0, 2, 0);
-const preMidnightChunk = {
-  domain: 'youtube.com',
-  startTime: lateNight.getTime(),
-  duration: CHECKPOINT_INTERVAL_MS
-};
-const postMidnightChunk = {
-  domain: 'youtube.com',
-  startTime: earlyMorning.getTime(),
-  duration: CHECKPOINT_INTERVAL_MS
-};
-
-const day1 = getDay(new Date(preMidnightChunk.startTime));
-const day2 = getDay(new Date(postMidnightChunk.startTime));
-assert('pre-midnight buckets to Jul 7', day1, '2026-07-07');
-assert('post-midnight buckets to Jul 8', day2, '2026-07-08');
-assertBool('midnight splits into different buckets', day1 !== day2, true);
-
-const totalMidnight = preMidnightChunk.duration + postMidnightChunk.duration;
-assertBool('midnight total is 2 min', totalMidnight, 120000);
-
-console.log('\n=== Checkpoint: 6-hr gap discarded ===');
-const GAP_DURATION_MS = 6 * 60 * 60 * 1000;
-assertBool('6hr gap exceeds cap', GAP_DURATION_MS > SLEEP_CAP_MS, true);
-assertBool('cap would discard 6hr gap', GAP_DURATION_MS > SLEEP_CAP_MS, true);
-
-const gapChunks = Math.floor(GAP_DURATION_MS / CHECKPOINT_INTERVAL_MS);
-assertBool('6hr gap has 360 checkpoint intervals', gapChunks, 360);
-
-console.log('\n=== Concurrency: Checkpoint + Switch race ===');
-
-function createMockStorage() {
-  const store = {};
-  return {
-    _store: store,
-    get: (keys, cb) => {
-      if (keys === null) {
-        cb({ ...store });
-      } else if (typeof keys === 'string') {
-        cb({ [keys]: store[keys] });
-      } else {
-        const result = {};
-        for (const k of keys) result[k] = store[k];
-        cb(result);
-      }
-    },
-    set: (obj, cb) => {
-      Object.assign(store, obj);
-      if (cb) cb();
-    },
-    remove: (keys, cb) => {
-      const arr = Array.isArray(keys) ? keys : [keys];
-      for (const k of arr) delete store[k];
-      if (cb) cb();
-    }
-  };
-}
-
-function createTestHarness() {
-  const storage = createMockStorage();
-  let currentSession = null;
-  let sessionQueue = Promise.resolve();
-  let isIdle = false;
-
-  function getDay(date) {
-    const d = date || new Date();
-    const year = d.getFullYear();
-    const month = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
-  }
-
-  async function persistSession(session) {
-    if (!session || session.duration < 500) return;
-    const day = getDay(new Date(session.startTime));
-    const key = `usage:${day}`;
-    return new Promise((resolve) => {
-      storage.get(key, (result) => {
-        const dayData = result[key] || {};
-        dayData[session.domain] = (dayData[session.domain] || 0) + session.duration;
-        storage.set({ [key]: dayData }, resolve);
-      });
-    });
-  }
-
-  async function endCurrentSession() {
-    if (!currentSession) return;
-    const now = Date.now();
-    const duration = now - currentSession.startTime;
-    if (duration > 30 * 60 * 1000) {
-      currentSession = null;
-      await storage.remove('currentSession');
-      return;
-    }
-    const sessionToSave = { ...currentSession, duration };
-    currentSession = null;
-    await storage.remove('currentSession');
-    await persistSession(sessionToSave);
-  }
-
-  async function checkpointSession() {
-    if (!currentSession || isIdle) return;
-    sessionQueue = sessionQueue.then(async () => {
-      try {
-        if (!currentSession || isIdle) return;
-        const now = Date.now();
-        const elapsed = now - currentSession.startTime;
-        if (elapsed >= CHECKPOINT_INTERVAL_MS) {
-          const startDay = getDay(new Date(currentSession.startTime));
-          const endDay = getDay(new Date(now));
-          if (startDay === endDay) {
-            await persistSession({
-              domain: currentSession.domain,
-              startTime: currentSession.startTime,
-              duration: elapsed
-            });
-          } else {
-            const midnight = new Date(now);
-            midnight.setHours(0, 0, 0, 0);
-            const firstDur = midnight.getTime() - currentSession.startTime;
-            const secondDur = now - midnight.getTime();
-            if (firstDur > 0) {
-              await persistSession({
-                domain: currentSession.domain,
-                startTime: currentSession.startTime,
-                duration: firstDur
-              });
-            }
-            if (secondDur > 0) {
-              await persistSession({
-                domain: currentSession.domain,
-                startTime: midnight.getTime(),
-                duration: secondDur
-              });
-            }
-          }
-          currentSession.startTime = now;
-          await storage.set({ currentSession });
-        }
-      } catch (e) {
-        console.error('Error checkpointing:', e);
-      }
-    });
-    return sessionQueue;
-  }
-
-  async function switchSession(domain, tabId) {
-    sessionQueue = sessionQueue.then(async () => {
-      try {
-        await endCurrentSession();
-        if (domain) {
-          currentSession = { domain, tabId, startTime: Date.now() };
-          await storage.set({ currentSession });
-        }
-      } catch (e) {
-        console.error('Error switching:', e);
-      }
-    });
-    return sessionQueue;
-  }
-
-  return {
-    storage, get currentSession() { return currentSession; },
-    set currentSession(v) { currentSession = v; },
-    get sessionQueue() { return sessionQueue; },
-    checkpointSession, switchSession, endCurrentSession, getDay
-  };
-}
-
+console.log('\n=== Session: switch persists previous session ===');
 {
-  const h = createTestHarness();
+  const t0 = new Date(2026, 6, 7, 14, 0, 0).getTime();
+  const { clock, storage, manager } = createHarness(t0);
 
-  const t0 = Date.now() - 90000;
-  h.currentSession = { domain: 'site-a.com', tabId: 1, startTime: t0 };
+  await manager.switchSession('site-a.com', 1);
+  clock.t = t0 + 90000;
+  await manager.switchSession('site-b.com', 2);
 
-  h.checkpointSession();
-  h.switchSession('site-b.com', 2);
-  await h.sessionQueue;
-
-  const day = h.getDay(new Date(t0));
-  const data = {};
-  h.storage.get(null, (r) => {
-    for (const [k, v] of Object.entries(r)) {
-      if (k.startsWith('usage:')) Object.assign(data, v);
-    }
-  });
-
-  const aTime = data['site-a.com'] || 0;
-  assertBool('site-a.com time > 0', aTime > 0, true);
-  assertBool('site-a.com time ~90s (no double count)', aTime >= 89000 && aTime <= 91000, true);
-
-  assertBool('currentSession is site-b.com', h.currentSession.domain, 'site-b.com');
-  assertBool('currentSession tabId is 2', h.currentSession.tabId, 2);
+  assert('site-a.com credited exactly 90s', usageFor(storage, '2026-07-07')['site-a.com'], 90000);
+  assert('currentSession is site-b.com', manager.currentSession.domain, 'site-b.com');
+  assert('currentSession tabId is 2', manager.currentSession.tabId, 2);
+  assert('currentSession persisted to storage', storage._store.currentSession.domain, 'site-b.com');
 }
 
+console.log('\n=== Session: switch to null ends tracking ===');
 {
-  const h = createTestHarness();
+  const t0 = new Date(2026, 6, 7, 14, 0, 0).getTime();
+  const { clock, storage, manager } = createHarness(t0);
 
-  const t0 = Date.now() - 60000;
-  h.currentSession = { domain: 'site-x.com', tabId: 10, startTime: t0 };
+  await manager.switchSession('site-a.com', 1);
+  clock.t = t0 + 60000;
+  await manager.switchSession(null, null);
 
-  h.checkpointSession();
-  h.switchSession('site-y.com', 20);
-  h.checkpointSession();
-  h.switchSession('site-z.com', 30);
-  await h.sessionQueue;
-
-  const data = {};
-  h.storage.get(null, (r) => {
-    for (const [k, v] of Object.entries(r)) {
-      if (k.startsWith('usage:')) Object.assign(data, v);
-    }
-  });
-
-  const xTime = data['site-x.com'] || 0;
-  assertBool('site-x.com preserved (~60s)', xTime >= 59000 && xTime <= 61000, true);
-  assertBool('currentSession is site-z.com', h.currentSession.domain, 'site-z.com');
-  assertBool('currentSession tabId is 30', h.currentSession.tabId, 30);
+  assert('site-a.com credited 60s', usageFor(storage, '2026-07-07')['site-a.com'], 60000);
+  assert('no current session', manager.currentSession, null);
+  assert('currentSession removed from storage', 'currentSession' in storage._store, false);
 }
 
-console.log('\n=== Midnight boundary: chunk split ===');
+console.log('\n=== Session: debounce drops sub-500ms sessions ===');
 {
-  const h = createTestHarness();
+  const t0 = new Date(2026, 6, 7, 14, 0, 0).getTime();
+  const { clock, storage, manager } = createHarness(t0);
 
-  const dayBefore = new Date(2026, 6, 7);
-  const dayAfter = new Date(2026, 6, 8);
-  const startTime = new Date(2026, 6, 7, 23, 59, 0).getTime();
-  const nowTime = new Date(2026, 6, 8, 0, 1, 0).getTime();
-  const elapsed = nowTime - startTime;
+  await manager.switchSession('flicker.com', 1);
+  clock.t = t0 + DEBOUNCE_MS - 1;
+  await manager.switchSession('site-b.com', 2);
 
-  h.currentSession = { domain: 'site-a.com', tabId: 1, startTime };
-
-  const startDay = h.getDay(new Date(startTime));
-  const endDay = h.getDay(new Date(nowTime));
-  assertBool('start and end on different days', startDay !== endDay, true);
-
-  const midnight = new Date(nowTime);
-  midnight.setHours(0, 0, 0, 0);
-  const firstDur = midnight.getTime() - startTime;
-  const secondDur = nowTime - midnight.getTime();
-
-  assertBool('first chunk > 0', firstDur > 0, true);
-  assertBool('second chunk > 0', secondDur > 0, true);
-  assertBool('chunks sum to total', firstDur + secondDur, elapsed);
-  assertBool('first chunk is 60s', firstDur, 60000);
-  assertBool('second chunk is 60s', secondDur, 60000);
+  assert('sub-500ms session not persisted', 'flicker.com' in usageFor(storage, '2026-07-07'), false);
 }
 
-console.log('\n=== Midnight boundary: no split same day ===');
+console.log('\n=== Session: sleep gap over cap is discarded ===');
 {
-  const startTime = new Date(2026, 6, 7, 14, 0, 0).getTime();
-  const nowTime = new Date(2026, 6, 7, 14, 1, 0).getTime();
+  const t0 = new Date(2026, 6, 7, 14, 0, 0).getTime();
+  const { clock, storage, manager } = createHarness(t0);
 
-  const startDay = getDay(new Date(startTime));
-  const endDay = getDay(new Date(nowTime));
-  assertBool('same day — no split needed', startDay === endDay, true);
+  await manager.switchSession('site-a.com', 1);
+  clock.t = t0 + SLEEP_CAP_MS + 1000;
+  await manager.switchSession('site-b.com', 2);
 
-  const elapsed = nowTime - startTime;
-  assertBool('single chunk duration correct', elapsed, 60000);
+  assert('over-cap session discarded', 'site-a.com' in usageFor(storage, '2026-07-07'), false);
+  assert('new session started after gap', manager.currentSession.domain, 'site-b.com');
 }
 
-console.log('\n=== Midnight boundary: sum equals total ===');
+console.log('\n=== Session: gap exactly at cap is kept ===');
 {
-  const startTime = new Date(2026, 6, 7, 23, 59, 30).getTime();
-  const nowTime = new Date(2026, 6, 8, 0, 0, 30).getTime();
-  const elapsed = nowTime - startTime;
+  const t0 = new Date(2026, 6, 7, 10, 0, 0).getTime();
+  const { clock, storage, manager } = createHarness(t0);
 
-  const midnight = new Date(nowTime);
-  midnight.setHours(0, 0, 0, 0);
-  const firstDur = midnight.getTime() - startTime;
-  const secondDur = nowTime - midnight.getTime();
+  await manager.switchSession('site-a.com', 1);
+  clock.t = t0 + SLEEP_CAP_MS;
+  await manager.switchSession(null, null);
 
-  assertBool('split sum equals total', firstDur + secondDur, elapsed);
-  assertBool('first part is 30s', firstDur, 30000);
-  assertBool('second part is 30s', secondDur, 30000);
+  assert('exactly-at-cap session kept', usageFor(storage, '2026-07-07')['site-a.com'], SLEEP_CAP_MS);
+}
+
+console.log('\n=== Checkpoint: flushes and resets startTime ===');
+{
+  const t0 = new Date(2026, 6, 7, 14, 0, 0).getTime();
+  const { clock, storage, manager } = createHarness(t0);
+
+  await manager.switchSession('site-a.com', 1);
+  clock.t = t0 + 2 * CHECKPOINT_INTERVAL_MS;
+  await manager.checkpointSession();
+
+  assert('elapsed time flushed', usageFor(storage, '2026-07-07')['site-a.com'], 2 * CHECKPOINT_INTERVAL_MS);
+  assert('session still running', manager.currentSession.domain, 'site-a.com');
+  assert('startTime reset to now', manager.currentSession.startTime, clock.t);
+}
+
+console.log('\n=== Checkpoint: below interval is a no-op ===');
+{
+  const t0 = new Date(2026, 6, 7, 14, 0, 0).getTime();
+  const { clock, storage, manager } = createHarness(t0);
+
+  await manager.switchSession('site-a.com', 1);
+  clock.t = t0 + 30000;
+  await manager.checkpointSession();
+
+  assert('nothing flushed', 'site-a.com' in usageFor(storage, '2026-07-07'), false);
+  assert('startTime unchanged', manager.currentSession.startTime, t0);
+}
+
+console.log('\n=== Checkpoint: no double count with rapid switch ===');
+{
+  const t0 = new Date(2026, 6, 7, 14, 0, 0).getTime();
+  const { clock, storage, manager } = createHarness(t0);
+
+  await manager.switchSession('site-a.com', 1);
+  clock.t = t0 + 90000;
+  manager.checkpointSession();
+  await manager.switchSession('site-b.com', 2);
+
+  assert('site-a.com credited exactly 90s total', usageFor(storage, '2026-07-07')['site-a.com'], 90000);
+  assert('currentSession is site-b.com', manager.currentSession.domain, 'site-b.com');
+}
+
+console.log('\n=== Checkpoint: interleaved checkpoints and switches stay ordered ===');
+{
+  const t0 = new Date(2026, 6, 7, 14, 0, 0).getTime();
+  const { clock, storage, manager } = createHarness(t0);
+
+  await manager.switchSession('site-x.com', 10);
+  clock.t = t0 + 60000;
+  manager.checkpointSession();
+  manager.switchSession('site-y.com', 20);
+  manager.checkpointSession();
+  await manager.switchSession('site-z.com', 30);
+
+  assert('site-x.com credited exactly 60s', usageFor(storage, '2026-07-07')['site-x.com'], 60000);
+  assert('site-y.com not persisted (0ms session)', 'site-y.com' in usageFor(storage, '2026-07-07'), false);
+  assert('currentSession is site-z.com', manager.currentSession.domain, 'site-z.com');
+  assert('currentSession tabId is 30', manager.currentSession.tabId, 30);
+}
+
+console.log('\n=== Checkpoint: midnight crossing splits into two buckets ===');
+{
+  const start = new Date(2026, 6, 7, 23, 59, 0).getTime();
+  const { clock, storage, manager } = createHarness(start);
+
+  await manager.switchSession('site-a.com', 1);
+  clock.t = new Date(2026, 6, 8, 0, 1, 0).getTime();
+  await manager.checkpointSession();
+
+  assert('60s in the Jul 7 bucket', usageFor(storage, '2026-07-07')['site-a.com'], 60000);
+  assert('60s in the Jul 8 bucket', usageFor(storage, '2026-07-08')['site-a.com'], 60000);
+  assert('startTime reset to now', manager.currentSession.startTime, clock.t);
+}
+
+console.log('\n=== Checkpoint: uneven midnight split sums to total ===');
+{
+  const start = new Date(2026, 6, 7, 23, 59, 30).getTime();
+  const { clock, storage, manager } = createHarness(start);
+
+  await manager.switchSession('site-a.com', 1);
+  clock.t = new Date(2026, 6, 8, 0, 1, 30).getTime();
+  await manager.checkpointSession();
+
+  const before = usageFor(storage, '2026-07-07')['site-a.com'];
+  const after = usageFor(storage, '2026-07-08')['site-a.com'];
+  assert('30s before midnight', before, 30000);
+  assert('90s after midnight', after, 90000);
+  assert('split sums to elapsed', before + after, 120000);
+}
+
+console.log('\n=== Restore: recent saved session is flushed ===');
+{
+  const t0 = new Date(2026, 6, 7, 14, 0, 0).getTime();
+  const { storage, manager } = createHarness(t0);
+  storage._store.currentSession = { domain: 'old.com', tabId: 5, startTime: t0 - 90000 };
+
+  await manager.restoreSession();
+
+  assert('saved session credited 90s', usageFor(storage, '2026-07-07')['old.com'], 90000);
+  assert('no current session after restore', manager.currentSession, null);
+  assert('currentSession removed from storage', 'currentSession' in storage._store, false);
+}
+
+console.log('\n=== Restore: stale saved session is discarded ===');
+{
+  const t0 = new Date(2026, 6, 7, 14, 0, 0).getTime();
+  const { storage, manager } = createHarness(t0);
+  storage._store.currentSession = { domain: 'old.com', tabId: 5, startTime: t0 - 4 * 60 * 60 * 1000 };
+
+  await manager.restoreSession();
+
+  assert('stale session not credited', 'old.com' in usageFor(storage, '2026-07-07'), false);
+  assert('currentSession removed from storage', 'currentSession' in storage._store, false);
+}
+
+console.log('\n=== getPruneKeys() ===');
+{
+  const today = new Date(2026, 6, 15);
+  const keys = [
+    'usage:2026-07-15',
+    'usage:2026-04-16',
+    'usage:2026-04-15',
+    'usage:2025-01-01',
+    'settings',
+    'currentSession'
+  ];
+
+  const pruned = getPruneKeys(keys, 90, today);
+  assert('prunes only expired usage keys', pruned, ['usage:2026-04-15', 'usage:2025-01-01']);
+
+  assert('exact cutoff day is kept', getPruneKeys(['usage:2026-07-08'], 7, today), []);
+  assert('day before cutoff is pruned', getPruneKeys(['usage:2026-07-07'], 7, today), ['usage:2026-07-07']);
+  assert('non-usage keys never pruned', getPruneKeys(['settings', 'currentSession'], 1, today), []);
+  assert('malformed usage key kept', getPruneKeys(['usage:not-a-date'], 90, today), []);
 }
 
 console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);

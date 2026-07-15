@@ -1,147 +1,29 @@
-let currentSession = null;
-let isIdle = false;
-let sessionQueue = Promise.resolve();
+import { getDomain, getPruneKeys, isExcluded } from './lib.js';
+import { createSessionManager, CHECKPOINT_INTERVAL_MS } from './session.js';
 
-const IGNORED_PREFIXES = ['chrome://', 'about:', 'new-tab-page:'];
-const DEBOUNCE_MS = 500;
 const IDLE_DETECTION_INTERVAL = 60;
 const IDLE_MIN_INTERVAL = 15;
 const PRUNE_DAYS = 90;
-const SLEEP_CAP_MS = 30 * 60 * 1000;
-const CHECKPOINT_INTERVAL_MS = 60 * 1000;
+const DEFAULT_SETTINGS = { idleThreshold: 60, retentionDays: 90, excludedDomains: [] };
 
-function getDomain(url) {
-  try {
-    for (const prefix of IGNORED_PREFIXES) {
-      if (url.startsWith(prefix)) return null;
-    }
-    const hostname = new URL(url).hostname;
-    if (!hostname || hostname === '') return null;
-    return hostname;
-  } catch {
-    return null;
-  }
-}
-
-function getDay(date) {
-  const d = date || new Date();
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
+const manager = createSessionManager(chrome.storage.local);
+let isIdle = false;
+let cachedSettings = DEFAULT_SETTINGS;
 
 async function getSettings() {
-  return new Promise((resolve) => {
-    chrome.storage.local.get('settings', (result) => {
-      resolve(result.settings || { idleThreshold: 60, retentionDays: 90 });
-    });
-  });
+  const result = await chrome.storage.local.get('settings');
+  cachedSettings = { ...DEFAULT_SETTINGS, ...(result.settings || {}) };
+  return cachedSettings;
 }
 
-async function persistSession(session) {
-  if (!session || session.duration < DEBOUNCE_MS) return;
-
-  const day = getDay(new Date(session.startTime));
-  const key = `usage:${day}`;
-
-  return new Promise((resolve) => {
-    chrome.storage.local.get(key, (result) => {
-      const dayData = result[key] || {};
-      dayData[session.domain] = (dayData[session.domain] || 0) + session.duration;
-      chrome.storage.local.set({ [key]: dayData }, resolve);
-    });
-  });
+function idleInterval(settings) {
+  return Math.max(settings.idleThreshold || IDLE_DETECTION_INTERVAL, IDLE_MIN_INTERVAL);
 }
 
-async function checkpointSession() {
-  if (!currentSession || isIdle) return;
-
-  sessionQueue = sessionQueue.then(async () => {
-    try {
-      if (!currentSession || isIdle) return;
-
-      const now = Date.now();
-      const elapsed = now - currentSession.startTime;
-
-      if (elapsed >= CHECKPOINT_INTERVAL_MS) {
-        const startDay = getDay(new Date(currentSession.startTime));
-        const endDay = getDay(new Date(now));
-
-        if (startDay === endDay) {
-          const chunk = {
-            domain: currentSession.domain,
-            startTime: currentSession.startTime,
-            duration: elapsed
-          };
-          await persistSession(chunk);
-        } else {
-          const midnight = new Date(now);
-          midnight.setHours(0, 0, 0, 0);
-          const firstChunkDuration = midnight.getTime() - currentSession.startTime;
-          const secondChunkDuration = now - midnight.getTime();
-
-          if (firstChunkDuration > 0) {
-            await persistSession({
-              domain: currentSession.domain,
-              startTime: currentSession.startTime,
-              duration: firstChunkDuration
-            });
-          }
-          if (secondChunkDuration > 0) {
-            await persistSession({
-              domain: currentSession.domain,
-              startTime: midnight.getTime(),
-              duration: secondChunkDuration
-            });
-          }
-        }
-
-        currentSession.startTime = now;
-        await chrome.storage.local.set({ currentSession });
-      }
-    } catch (e) {
-      console.error('Error checkpointing session:', e);
-    }
-  });
-  return sessionQueue;
-}
-
-async function endCurrentSession() {
-  if (!currentSession) return;
-
-  const now = Date.now();
-  const duration = now - currentSession.startTime;
-
-  if (duration > SLEEP_CAP_MS) {
-    currentSession = null;
-    await chrome.storage.local.remove('currentSession');
-    return;
-  }
-
-  const sessionToSave = { ...currentSession, duration };
-  currentSession = null;
-  await chrome.storage.local.remove('currentSession');
-  await persistSession(sessionToSave);
-}
-
-async function switchSession(domain, tabId) {
-  sessionQueue = sessionQueue.then(async () => {
-    try {
-      await endCurrentSession();
-      if (domain) {
-        currentSession = {
-          domain,
-          tabId,
-          startTime: Date.now()
-        };
-        await chrome.storage.local.set({ currentSession });
-      }
-    } catch (e) {
-      console.error('Error in switchSession queue:', e);
-    }
-  });
-  return sessionQueue;
+function resolveDomain(url) {
+  const domain = getDomain(url);
+  if (isExcluded(domain, cachedSettings.excludedDomains)) return null;
+  return domain;
 }
 
 async function handleTabActivation(tab) {
@@ -149,8 +31,7 @@ async function handleTabActivation(tab) {
 
   try {
     if (tab && tab.url) {
-      const domain = getDomain(tab.url);
-      await switchSession(domain, tab.id);
+      await manager.switchSession(resolveDomain(tab.url), tab.id);
     }
   } catch (e) {
     console.error('Error handling tab activation:', e);
@@ -163,8 +44,7 @@ async function handleTabUpdate(tabId, changeInfo, tab) {
 
   try {
     if (tab && tab.url) {
-      const domain = getDomain(tab.url);
-      await switchSession(domain, tabId);
+      await manager.switchSession(resolveDomain(tab.url), tabId);
     }
   } catch (e) {
     console.error('Error handling tab update:', e);
@@ -176,14 +56,13 @@ async function handleWindowFocusChanged(windowId) {
 
   try {
     if (windowId === chrome.windows.WINDOW_ID_NONE) {
-      await switchSession(null, null);
+      await manager.switchSession(null, null);
       return;
     }
 
     const tabs = await chrome.tabs.query({ active: true, windowId });
     if (tabs && tabs[0] && tabs[0].url) {
-      const domain = getDomain(tabs[0].url);
-      await switchSession(domain, tabs[0].id);
+      await manager.switchSession(resolveDomain(tabs[0].url), tabs[0].id);
     }
   } catch (e) {
     console.error('Error handling window focus change:', e);
@@ -191,9 +70,10 @@ async function handleWindowFocusChanged(windowId) {
 }
 
 async function handleTabRemoved(tabId) {
-  if (currentSession && currentSession.tabId === tabId) {
+  const session = manager.currentSession;
+  if (session && session.tabId === tabId) {
     try {
-      await switchSession(null, null);
+      await manager.switchSession(null, null);
     } catch (e) {
       console.error('Error handling tab removal:', e);
     }
@@ -203,38 +83,24 @@ async function handleTabRemoved(tabId) {
 async function pruneOldData() {
   try {
     const settings = await getSettings();
-    const retentionDays = settings.retentionDays || PRUNE_DAYS;
-    const cutoffDate = new Date();
-    cutoffDate.setDate(cutoffDate.getDate() - retentionDays);
-    cutoffDate.setHours(0, 0, 0, 0);
-
     const allData = await chrome.storage.local.get(null);
-    const keysToRemove = [];
-
-    for (const key of Object.keys(allData)) {
-      if (!key.startsWith('usage:')) continue;
-      const dateStr = key.replace('usage:', '');
-      const date = new Date(dateStr + 'T00:00:00');
-      if (date < cutoffDate) {
-        keysToRemove.push(key);
-      }
-    }
+    const keysToRemove = getPruneKeys(
+      Object.keys(allData),
+      settings.retentionDays || PRUNE_DAYS
+    );
 
     if (keysToRemove.length > 0) {
-      chrome.storage.local.remove(keysToRemove);
+      await chrome.storage.local.remove(keysToRemove);
     }
   } catch (e) {
     console.error('Error pruning old data:', e);
   }
 }
 
-chrome.idle.setDetectionInterval(IDLE_DETECTION_INTERVAL);
-
 async function applySettings() {
   try {
     const settings = await getSettings();
-    const interval = Math.max(settings.idleThreshold || IDLE_DETECTION_INTERVAL, IDLE_MIN_INTERVAL);
-    chrome.idle.setDetectionInterval(interval);
+    chrome.idle.setDetectionInterval(idleInterval(settings));
   } catch (e) {
     console.error('Failed to apply settings:', e);
   }
@@ -252,13 +118,12 @@ chrome.idle.onStateChanged.addListener(async (newState) => {
   try {
     if (newState === 'idle' || newState === 'locked') {
       isIdle = true;
-      await switchSession(null, null);
+      await manager.switchSession(null, null);
     } else if (newState === 'active') {
       isIdle = false;
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
       if (tabs && tabs[0] && tabs[0].url) {
-        const domain = getDomain(tabs[0].url);
-        await switchSession(domain, tabs[0].id);
+        await manager.switchSession(resolveDomain(tabs[0].url), tabs[0].id);
       }
     }
   } catch (e) {
@@ -280,21 +145,13 @@ chrome.tabs.onUpdated.addListener(handleTabUpdate);
 chrome.tabs.onRemoved.addListener(handleTabRemoved);
 chrome.windows.onFocusChanged.addListener(handleWindowFocusChanged);
 
-chrome.runtime.onSuspend.addListener(async () => {
-  try {
-    await switchSession(null, null);
-  } catch (e) {
-    console.error('Error on suspend:', e);
-  }
-});
-
-chrome.alarms.get('pruneOldData').then((alarms) => {
-  if (!alarms || alarms.length === 0) {
+chrome.alarms.get('pruneOldData').then((alarm) => {
+  if (!alarm) {
     chrome.alarms.create('pruneOldData', { periodInMinutes: 1440 });
   }
 });
-chrome.alarms.get('sessionCheckpoint').then((alarms) => {
-  if (!alarms || alarms.length === 0) {
+chrome.alarms.get('sessionCheckpoint').then((alarm) => {
+  if (!alarm) {
     chrome.alarms.create('sessionCheckpoint', {
       periodInMinutes: CHECKPOINT_INTERVAL_MS / 60000
     });
@@ -304,27 +161,27 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'pruneOldData') {
     pruneOldData();
   } else if (alarm.name === 'sessionCheckpoint') {
-    checkpointSession();
+    if (!isIdle) {
+      manager.checkpointSession();
+    }
   }
 });
 
 (async () => {
   try {
-    const saved = await chrome.storage.local.get('currentSession');
-    if (saved.currentSession) {
-      const elapsed = Date.now() - saved.currentSession.startTime;
-      if (elapsed <= SLEEP_CAP_MS) {
-        currentSession = saved.currentSession;
-        await endCurrentSession();
-      } else {
-        await chrome.storage.local.remove('currentSession');
-      }
-    }
+    await manager.restoreSession();
+
+    // A restarted worker loses the in-memory idle flag, and onStateChanged
+    // only fires on transitions — if the user is still idle, no event will
+    // arrive to tell us. Query the state before starting a new session.
+    const settings = await getSettings();
+    const state = await chrome.idle.queryState(idleInterval(settings));
+    isIdle = state !== 'active';
+    if (isIdle) return;
 
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     if (tabs && tabs[0] && tabs[0].url) {
-      const domain = getDomain(tabs[0].url);
-      await switchSession(domain, tabs[0].id);
+      await manager.switchSession(resolveDomain(tabs[0].url), tabs[0].id);
     }
   } catch (e) {
     console.error('Error initializing session:', e);

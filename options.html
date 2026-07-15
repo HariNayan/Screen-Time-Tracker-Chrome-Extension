@@ -18,8 +18,9 @@
       --text-secondary: #666;
       --border: #e0e0e0;
       --input-bg: #ffffff;
-      --accent: #1a1a1a;
-      --accent-hover: #333;
+      --accent: #2a78d6;
+      --accent-text: #ffffff;
+      --accent-hover: #1c5cab;
       --status-color: #28a745;
     }
 
@@ -30,8 +31,9 @@
       --text-secondary: #aaaaaa;
       --border: #333333;
       --input-bg: #2a2a2a;
-      --accent: #e0e0e0;
-      --accent-hover: #cccccc;
+      --accent: #3987e5;
+      --accent-text: #ffffff;
+      --accent-hover: #6da7ec;
       --status-color: #5cb85c;
     }
 
@@ -127,11 +129,49 @@
       border-color: var(--accent);
     }
 
+    textarea {
+      width: 100%;
+      min-height: 90px;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 14px;
+      font-family: inherit;
+      background: var(--input-bg);
+      color: var(--text);
+      resize: vertical;
+      transition: border-color 0.15s ease, background 0.2s ease;
+    }
+
+    textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .checkbox-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+    }
+
+    .checkbox-row input[type="checkbox"] {
+      margin-top: 2px;
+      width: 16px;
+      height: 16px;
+      accent-color: var(--accent);
+      flex-shrink: 0;
+    }
+
+    .checkbox-row label {
+      margin-bottom: 0;
+      cursor: pointer;
+    }
+
     .save-btn {
       width: 100%;
       padding: 12px;
       background: var(--accent);
-      color: var(--card-bg);
+      color: var(--accent-text);
       border: none;
       border-radius: 8px;
       font-size: 14px;
@@ -179,6 +219,22 @@
       <label for="retention-days">Data Retention (days)</label>
       <p class="description">How many days of tracking data to keep. Older data is automatically pruned.</p>
       <input type="number" id="retention-days" min="7" max="365" value="90">
+    </div>
+
+    <div class="setting-group">
+      <div class="checkbox-row">
+        <input type="checkbox" id="group-subdomains">
+        <div>
+          <label for="group-subdomains">Group subdomains</label>
+          <p class="description">Combine subdomains in the dashboard — e.g. www.google.com and mail.google.com show as google.com. Stored data is unchanged.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="setting-group">
+      <label for="excluded-domains">Excluded Domains</label>
+      <p class="description">One domain per line. These sites (and their subdomains) are never tracked. Existing data for them is kept.</p>
+      <textarea id="excluded-domains" placeholder="example.com&#10;mybank.com" spellcheck="false"></textarea>
     </div>
 
     <button id="save-btn" class="save-btn">Save Settings</button>

@@ -4,12 +4,17 @@ Chrome extension that tracks how much time you spend on each website. Data stays
 
 ## What it does
 
-Click the extension icon to see a dashboard of where your time went. Two views:
+Click the extension icon to see a card-based dashboard of where your time went:
 
-- **Today** — domains you visited today, sorted by time, with a bar chart
-- **This Week** — same thing but broken down by day (today, yesterday, and the last 5 days)
+- **Hero card** — total active time for the current view in a big pill
+- **Top 5 Sites** — a donut chart (top 5 domains + Other, total site count in the center) with a legend
+- **Activity list** — every domain sorted by time with a progress bar; the week view adds a 7-day column chart and groups domains by day
 
-Bottom of the popup has buttons to **Export Data** (JSON download) or **Clear All Data**.
+The footer's **This Week** button switches between Today and last-7-days views.
+
+The dashboard includes the in-progress session and ticks up live while the popup is open — you don't have to wait for the next checkpoint to see current activity. The site being tracked right now gets a pulsing green dot. Durations under a minute show in seconds ("45s"). Each domain shows its real favicon, served by Chrome's local `_favicon` cache — no network requests. If the browser doesn't support the favicon API, rows fall back to colored monogram tiles generated from the domain name. Hovering a row shows its share of that day's total.
+
+Bottom of the popup has pill buttons: **This Week** (view switch), **Export Data** (choose JSON or CSV), and **Clear History**.
 
 Dark/light mode toggle in both the popup and the settings page.
 
@@ -58,7 +63,7 @@ Values are in milliseconds. The current in-progress session is stored as `curren
 }
 ```
 
-`currentSession` is persisted so the service worker can resume tracking after being restarted by Chrome. On startup, if the saved session's elapsed time is under 30 minutes, it's flushed and a new session begins for the active tab.
+`currentSession` is persisted so the service worker can resume tracking after being restarted by Chrome. On startup, if the saved session's elapsed time is under 30 minutes, it's flushed. The worker then queries `chrome.idle.queryState()` — a restarted worker loses its in-memory idle flag, and Chrome only fires idle events on state *changes* — and starts a new session for the active tab only if the user is actually active.
 
 ## Settings
 
@@ -68,6 +73,10 @@ Right-click the extension icon → Options (or find it in `chrome://extensions`)
 |---|---|---|---|
 | Idle Threshold | Seconds of inactivity before tracking pauses | 15–300 | 60 |
 | Data Retention | Days before old usage data is deleted | 7–365 | 90 |
+| Group Subdomains | Combine subdomains in the dashboard (www.google.com + mail.google.com → google.com). Display-only; stored data keeps full hostnames | on/off | off |
+| Excluded Domains | Domains (and their subdomains) that are never tracked. Existing data for them is kept | one per line | empty |
+
+Values outside the numeric ranges are clamped on save.
 
 The idle threshold uses `chrome.idle.setDetectionInterval()` — the actual Chrome idle detection has a minimum of 15 seconds regardless of what you set.
 
@@ -76,57 +85,63 @@ Pruning runs once a day via a Chrome alarm. It compares each `usage:YYYY-MM-DD` 
 ## Permissions
 
 ```
-"permissions": ["tabs", "storage", "alarms", "idle", "downloads"]
+"permissions": ["tabs", "storage", "alarms", "idle", "downloads", "favicon"]
 ```
 
 - `tabs` — read active tab URLs to extract domains
 - `storage` — persist usage data locally
 - `alarms` — session checkpoints (every 60s) and daily data pruning
 - `idle` — detect when the screen is locked or the user is idle
-- `downloads` — export data as a JSON file
+- `downloads` — export data as a JSON or CSV file
+- `favicon` — show site icons from Chrome's local favicon cache (no network; requires Chrome 104+, monogram fallback otherwise)
 
 No `host_permissions`. No content scripts. The extension never makes network requests.
 
 ## Ignored URLs
 
-Internal Chrome pages are skipped: `chrome://`, `about:`, `new-tab-page:`. Tabs on these pages don't generate tracking data. If you switch to an ignored page, the current session is ended but no new one starts.
+Internal browser and extension pages are skipped: `chrome://`, `chrome-extension://`, `edge://`, `devtools://`, `about:`, `new-tab-page:`. Tabs on these pages don't generate tracking data. If you switch to an ignored page, the current session is ended but no new one starts.
 
 ## Popup layout
 
 ```
 ┌──────────────────────────────┐
-│ Screen Time Tracker    [🌙]    │  ← theme toggle
-│ [Today] [This Week]          │  ← view switcher
-├──────────────────────────────┤
-│ Total Time    Sites Visited  │
-│   2h 15m          12         │  ← stats
-│ Showing: 2026-07-07          │  ← date range
-├──────────────────────────────┤
-│ github.com         1h 30m    │
-│ ████████████████░░░░         │  ← domain list
-│ youtube.com          25m     │
-│ ███████░░░░░░░░░░░░░░        │
-│ stackoverflow.com    20m     │
-│ █████░░░░░░░░░░░░░░░░░       │
-│ ...                          │
-├──────────────────────────────┤
-│ [Export Data] [Clear All]    │  ← footer
+│ ╭──────────────────────╮ [🌙] │
+│ │   Today's Activity   │     │  ← hero card
+│ │      ( 2h 15m )      │     │  ← total time pill
+│ │      Active Time     │     │
+│ ╰──────────────────────╯     │
+│ ╭──────────────────────╮     │
+│ │      Top 5 Sites     │     │
+│ │   ◔ 12      ▪ github │     │  ← donut + legend
+│ │  Websites   ▪ youtube│     │
+│ ╰──────────────────────╯     │
+│ ╭──────────────────────╮     │
+│ │ Today's Activity     │     │
+│ │ Ⓖ github.com  1h 30m │     │  ← scrollable list
+│ │ ▬▬▬▬▬▬▬▬▬▬░░░░       │     │
+│ │ Ⓨ youtube.com   25m  │     │
+│ │ ▬▬▬▬▬░░░░░░░░░       │     │
+│ ╰──────────────────────╯     │
+│ (This Week)(Export)(Clear)   │  ← pill buttons
 └──────────────────────────────┘
 ```
 
-The week view groups domains under day headers ("Today", "Yesterday", "Mon, Jul 5", etc.). Each day shows its own domain list sorted by time.
+The week view swaps the hero to the 7-day total, aggregates the donut across the week, opens the list with a 7-day column chart (hover a column for the exact time), and groups domains under day headers ("Today", "Yesterday", "Mon, Jul 5", etc.).
 
 ## Project files
 
 ```
-manifest.json    Manifest V3 config — permissions, service worker, popup, options page
-background.js    Service worker — session tracking, checkpointing, idle handling, pruning
+manifest.json    Manifest V3 config — permissions, module service worker, popup, options page
+lib.js           Shared pure helpers — domain parsing, date keys, formatting, HTML escaping, prune selection
+session.js       Session manager — persistence, checkpointing, midnight splitting, sleep cap (storage and clock injected)
+background.js    Service worker — wires Chrome tab/window/idle/alarm events to the session manager
 popup.html       Dashboard markup
 popup.css        Dashboard styles (light + dark via CSS custom properties)
 popup.js         Dashboard logic — data loading, rendering, theme toggle, export/clear
 options.html     Settings page markup + inline styles
 options.js       Settings page logic — load/save settings, theme toggle
 icons/           Extension icons (16, 48, 128px PNGs)
+package.json     Enables ES modules for Node so tests can import the extension code
 test.js          Unit tests (run with `node test.js`)
 ```
 
@@ -136,7 +151,7 @@ test.js          Unit tests (run with `node test.js`)
 node test.js
 ```
 
-Tests mock the `chrome.*` APIs and verify session handling, checkpoint splitting, data persistence, and pruning logic.
+The tests import the real `lib.js` and `session.js` modules — the same code the extension runs — with a mock storage backend and a fake clock. They cover domain parsing, session switching, checkpoint flushing, midnight splitting, the sleep cap, the 500ms debounce, worker-restart session restore, and pruning.
 
 
 ```
