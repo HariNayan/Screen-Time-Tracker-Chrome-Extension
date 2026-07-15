@@ -28,8 +28,11 @@ The background service worker (`background.js`) listens to Chrome tab and window
 | Navigate within a tab | Same — ends old, starts new |
 | Switch windows | Focus changes to the active tab in the new window |
 | Tab closed | Session for that tab is flushed to storage |
+| Chrome loses focus (another app, browser, or profile) | Session ends; nothing is tracked |
 | Idle/lock screen | Tracking pauses entirely |
-| Unlock/resume | Tracking resumes on whatever tab is active |
+| Unlock/resume | Tracking resumes only if a Chrome window is focused |
+
+Sessions can only start while a window of this Chrome profile has focus — every entry point (tab events, idle recovery, service-worker restart) checks focus first, and the 60-second checkpoint re-verifies it, ending any session that survived a missed blur event.
 
 A checkpoint alarm fires every 60 seconds. If the current session is still going, it saves the elapsed time as a chunk and resets the start time. This means if Chrome kills the service worker mid-session, you only lose up to 60 seconds of data instead of everything since the last tab switch.
 

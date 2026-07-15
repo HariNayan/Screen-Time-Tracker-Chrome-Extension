@@ -26,13 +26,36 @@ function resolveDomain(url) {
   return domain;
 }
 
+// The idle API only reports system-wide inactivity — using another app,
+// browser, or Chrome profile still counts as "active". Every session start
+// must therefore verify a window of THIS profile actually has focus.
+async function isChromeFocused() {
+  try {
+    const win = await chrome.windows.getLastFocused();
+    return Boolean(win && win.focused);
+  } catch {
+    return false;
+  }
+}
+
+async function startSessionForFocusedTab() {
+  const win = await chrome.windows.getLastFocused();
+  if (!win || !win.focused) return;
+
+  const tabs = await chrome.tabs.query({ active: true, windowId: win.id });
+  if (tabs && tabs[0] && tabs[0].url) {
+    await manager.switchSession(resolveDomain(tabs[0].url), tabs[0].id);
+  }
+}
+
 async function handleTabActivation(tab) {
   if (isIdle) return;
 
   try {
-    if (tab && tab.url) {
-      await manager.switchSession(resolveDomain(tab.url), tab.id);
-    }
+    if (!tab || !tab.url) return;
+    const win = await chrome.windows.get(tab.windowId);
+    if (!win || !win.focused) return;
+    await manager.switchSession(resolveDomain(tab.url), tab.id);
   } catch (e) {
     console.error('Error handling tab activation:', e);
   }
@@ -43,9 +66,10 @@ async function handleTabUpdate(tabId, changeInfo, tab) {
   if (changeInfo.status !== 'complete') return;
 
   try {
-    if (tab && tab.url) {
-      await manager.switchSession(resolveDomain(tab.url), tabId);
-    }
+    if (!tab || !tab.url || !tab.active) return;
+    const win = await chrome.windows.get(tab.windowId);
+    if (!win || !win.focused) return;
+    await manager.switchSession(resolveDomain(tab.url), tabId);
   } catch (e) {
     console.error('Error handling tab update:', e);
   }
@@ -121,10 +145,7 @@ chrome.idle.onStateChanged.addListener(async (newState) => {
       await manager.switchSession(null, null);
     } else if (newState === 'active') {
       isIdle = false;
-      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (tabs && tabs[0] && tabs[0].url) {
-        await manager.switchSession(resolveDomain(tabs[0].url), tabs[0].id);
-      }
+      await startSessionForFocusedTab();
     }
   } catch (e) {
     console.error('Error handling idle state change:', e);
@@ -157,11 +178,17 @@ chrome.alarms.get('sessionCheckpoint').then((alarm) => {
     });
   }
 });
-chrome.alarms.onAlarm.addListener((alarm) => {
+chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === 'pruneOldData') {
     pruneOldData();
   } else if (alarm.name === 'sessionCheckpoint') {
-    if (!isIdle) {
+    if (isIdle) return;
+    // Safety net: if the blur event was missed (or never fired), a running
+    // session while Chrome is unfocused gets ended here, capping any
+    // overcount at one checkpoint interval.
+    if (manager.currentSession && !(await isChromeFocused())) {
+      manager.switchSession(null, null);
+    } else {
       manager.checkpointSession();
     }
   }
@@ -179,10 +206,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     isIdle = state !== 'active';
     if (isIdle) return;
 
-    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tabs && tabs[0] && tabs[0].url) {
-      await manager.switchSession(resolveDomain(tabs[0].url), tabs[0].id);
-    }
+    await startSessionForFocusedTab();
   } catch (e) {
     console.error('Error initializing session:', e);
   }
