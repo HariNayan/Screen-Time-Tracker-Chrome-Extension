@@ -3,6 +3,28 @@ import { getDay } from './lib.js';
 export const DEBOUNCE_MS = 500;
 export const SLEEP_CAP_MS = 30 * 60 * 1000;
 export const CHECKPOINT_INTERVAL_MS = 60 * 1000;
+export const SESSION_LOG_CAP = 1000;
+export const COALESCE_GAP_MS = 1500;
+
+// Session log entries are [startMs, durationMs, domain] triples. Checkpoints
+// split one continuous visit into 60s chunks that land back-to-back, so a
+// chunk that starts where the previous same-domain entry ended extends that
+// entry instead of appending — one log row stays one continuous visit.
+export function appendToLog(log, { domain, startTime, duration }) {
+  const last = log[log.length - 1];
+  if (
+    last &&
+    last[2] === domain &&
+    startTime >= last[0] &&
+    startTime - (last[0] + last[1]) <= COALESCE_GAP_MS
+  ) {
+    last[1] = startTime + duration - last[0];
+    return log;
+  }
+  if (log.length >= SESSION_LOG_CAP) return log;
+  log.push([startTime, duration, domain]);
+  return log;
+}
 
 // storage must expose promise-based get/set/remove (chrome.storage.local
 // satisfies this directly; tests inject a mock). `now` is injectable so
@@ -22,12 +44,14 @@ export function createSessionManager(storage, { now = Date.now } = {}) {
     if (!session || session.duration < DEBOUNCE_MS) return;
 
     const day = getDay(new Date(session.startTime));
-    const key = `usage:${day}`;
+    const usageKey = `usage:${day}`;
+    const sessionsKey = `sessions:${day}`;
 
-    const result = await storage.get(key);
-    const dayData = result[key] || {};
+    const result = await storage.get([usageKey, sessionsKey]);
+    const dayData = result[usageKey] || {};
     dayData[session.domain] = (dayData[session.domain] || 0) + session.duration;
-    await storage.set({ [key]: dayData });
+    const log = appendToLog(result[sessionsKey] || [], session);
+    await storage.set({ [usageKey]: dayData, [sessionsKey]: log });
   }
 
   async function endCurrentSession() {

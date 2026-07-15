@@ -445,7 +445,7 @@ async function getAllUsageData() {
 
   const usageData = {};
   for (const [key, value] of Object.entries(allData)) {
-    if (key.startsWith('usage:')) {
+    if (key.startsWith('usage:') || key.startsWith('sessions:')) {
       usageData[key] = value;
     }
   }
@@ -460,7 +460,11 @@ async function exportAs(format) {
 
     let content, mime, filename;
     if (format === 'csv') {
-      content = toCsv(usageData);
+      const dailyOnly = {};
+      for (const [key, value] of Object.entries(usageData)) {
+        if (key.startsWith('usage:')) dailyOnly[key] = value;
+      }
+      content = toCsv(dailyOnly);
       mime = 'text/csv';
       filename = 'site-time-tracker-data.csv';
     } else {
@@ -495,7 +499,8 @@ function setupClear() {
   document.getElementById('btn-clear').addEventListener('click', () => {
     if (confirm('Are you sure you want to clear all tracking data? This cannot be undone.')) {
       chrome.storage.local.get(null, (result) => {
-        const keysToRemove = Object.keys(result).filter(k => k.startsWith('usage:'));
+        const keysToRemove = Object.keys(result)
+          .filter(k => k.startsWith('usage:') || k.startsWith('sessions:'));
         chrome.storage.local.remove(keysToRemove, () => {
           if (chrome.runtime.lastError) {
             console.error('Clear failed:', chrome.runtime.lastError);

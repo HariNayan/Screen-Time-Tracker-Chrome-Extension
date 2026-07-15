@@ -12,9 +12,12 @@ import {
 } from './lib.js';
 import {
   createSessionManager,
+  appendToLog,
   DEBOUNCE_MS,
   SLEEP_CAP_MS,
-  CHECKPOINT_INTERVAL_MS
+  CHECKPOINT_INTERVAL_MS,
+  SESSION_LOG_CAP,
+  COALESCE_GAP_MS
 } from './session.js';
 
 let passed = 0;
@@ -154,6 +157,67 @@ console.log('\n=== toCsv() ===');
   assert('special chars quoted', lines[2], '2026-07-07,"weird""domain,com",1000,1s');
   assert('second day follows', lines[3], '2026-07-08,b.com,60000,1m');
   assert('row count', lines.length, 4);
+}
+
+console.log('\n=== appendToLog() ===');
+{
+  const log = [];
+  appendToLog(log, { domain: 'a.com', startTime: 1000, duration: 60000 });
+  assert('first entry appended', log, [[1000, 60000, 'a.com']]);
+
+  appendToLog(log, { domain: 'a.com', startTime: 61000, duration: 60000 });
+  assert('contiguous same domain coalesced', log, [[1000, 120000, 'a.com']]);
+
+  appendToLog(log, { domain: 'a.com', startTime: 121000 + COALESCE_GAP_MS, duration: 5000 });
+  assert('within-tolerance gap coalesced', log.length, 1);
+
+  appendToLog(log, { domain: 'b.com', startTime: 200000, duration: 10000 });
+  assert('different domain appended', log.length, 2);
+
+  appendToLog(log, { domain: 'b.com', startTime: 200000 + 10000 + COALESCE_GAP_MS + 1, duration: 5000 });
+  assert('over-tolerance gap appended', log.length, 3);
+}
+{
+  const log = [];
+  for (let i = 0; i < SESSION_LOG_CAP; i++) {
+    appendToLog(log, { domain: `site${i}.com`, startTime: i * 10000, duration: 1000 });
+  }
+  appendToLog(log, { domain: 'overflow.com', startTime: SESSION_LOG_CAP * 10000, duration: 1000 });
+  assert('cap stops appends', log.length, SESSION_LOG_CAP);
+
+  const lastStart = log[log.length - 1][0];
+  appendToLog(log, { domain: log[log.length - 1][2], startTime: lastStart + 1000, duration: 2000 });
+  assert('cap still allows coalescing', log[log.length - 1][1], 3000);
+}
+
+console.log('\n=== Session log: written through the manager ===');
+{
+  const t0 = new Date(2026, 6, 7, 14, 0, 0).getTime();
+  const { clock, storage, manager } = createHarness(t0);
+
+  await manager.switchSession('site-a.com', 1);
+  clock.t = t0 + 60000;
+  await manager.checkpointSession();
+  clock.t = t0 + 120000;
+  await manager.checkpointSession();
+  clock.t = t0 + 150000;
+  await manager.switchSession('site-b.com', 2);
+
+  const log = storage._store['sessions:2026-07-07'];
+  assert('checkpoint chunks coalesce to one entry', log, [[t0, 150000, 'site-a.com']]);
+}
+{
+  const start = new Date(2026, 6, 7, 23, 59, 0).getTime();
+  const { clock, storage, manager } = createHarness(start);
+
+  await manager.switchSession('site-a.com', 1);
+  clock.t = new Date(2026, 6, 8, 0, 1, 0).getTime();
+  await manager.checkpointSession();
+
+  assert('pre-midnight chunk in Jul 7 log', storage._store['sessions:2026-07-07'], [[start, 60000, 'site-a.com']]);
+  assert('post-midnight chunk in Jul 8 log',
+    storage._store['sessions:2026-07-08'],
+    [[new Date(2026, 6, 8, 0, 0, 0).getTime(), 60000, 'site-a.com']]);
 }
 
 console.log('\n=== Session: switch persists previous session ===');
@@ -353,6 +417,7 @@ console.log('\n=== getPruneKeys() ===');
 
   assert('exact cutoff day is kept', getPruneKeys(['usage:2026-07-08'], 7, today), []);
   assert('day before cutoff is pruned', getPruneKeys(['usage:2026-07-07'], 7, today), ['usage:2026-07-07']);
+  assert('expired session logs pruned too', getPruneKeys(['sessions:2026-04-15', 'sessions:2026-07-14'], 90, today), ['sessions:2026-04-15']);
   assert('non-usage keys never pruned', getPruneKeys(['settings', 'currentSession'], 1, today), []);
   assert('malformed usage key kept', getPruneKeys(['usage:not-a-date'], 90, today), []);
 }

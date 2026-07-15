@@ -124,14 +124,17 @@ export function toCsv(usageData) {
   return rows.map((row) => row.map(csvEscape).join(',')).join('\r\n') + '\r\n';
 }
 
+const DATED_KEY_RE = /^(?:usage|sessions):(\d{4}-\d{2}-\d{2})$/;
+
 export function getPruneKeys(keys, retentionDays, today = new Date()) {
   const cutoffDate = new Date(today);
   cutoffDate.setDate(cutoffDate.getDate() - retentionDays);
   cutoffDate.setHours(0, 0, 0, 0);
 
   return keys.filter((key) => {
-    if (!key.startsWith('usage:')) return false;
-    const date = new Date(key.slice('usage:'.length) + 'T00:00:00');
+    const match = DATED_KEY_RE.exec(key);
+    if (!match) return false;
+    const date = new Date(match[1] + 'T00:00:00');
     return date < cutoffDate;
   });
 }
