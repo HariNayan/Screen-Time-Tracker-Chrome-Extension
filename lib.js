@@ -135,6 +135,54 @@ export function computeVisits(log) {
   return visits;
 }
 
+export function longestSession(log) {
+  let best = null;
+  for (const entry of log) {
+    if (!best || entry[1] > best[1]) best = entry;
+  }
+  return best;
+}
+
+const FOCUS_STRETCH_MIN_MS = 25 * 60 * 1000;
+const HABIT_MIN_COUNT = 20;
+const HABIT_MAX_AVG_MS = 2 * 60 * 1000;
+const TREND_MIN_MS = 10 * 60 * 1000;
+
+// One observation for the popup, or null when nothing is worth saying.
+// Rules are ordered: a real focus stretch beats a checking habit beats a
+// week-over-week trend, and each has a threshold so the line stays quiet
+// rather than stating something trivial.
+export function pickInsight({ log = [], today = {}, lastWeek = {} } = {}) {
+  const best = longestSession(log);
+  if (best && best[1] >= FOCUS_STRETCH_MIN_MS) {
+    return `Longest focus stretch today: ${formatTime(best[1])} on ${best[2]}`;
+  }
+
+  const visits = computeVisits(log);
+  let habit = null;
+  for (const [domain, v] of Object.entries(visits)) {
+    if (v.count >= HABIT_MIN_COUNT && v.totalMs / v.count < HABIT_MAX_AVG_MS && (!habit || v.count > habit.count)) {
+      habit = { domain, count: v.count };
+    }
+  }
+  if (habit) {
+    return `You've opened ${habit.domain} ${habit.count} times today`;
+  }
+
+  const entries = Object.entries(today).sort((a, b) => b[1] - a[1]);
+  if (entries.length > 0) {
+    const [domain, ms] = entries[0];
+    const prev = lastWeek[domain] || 0;
+    if (ms >= TREND_MIN_MS && prev >= TREND_MIN_MS) {
+      const ratio = ms / prev;
+      if (ratio >= 1.5) return `${domain}: ${Math.round((ratio - 1) * 100)}% more than this day last week`;
+      if (ratio <= 0.67) return `${domain}: ${Math.round((1 - ratio) * 100)}% less than this day last week`;
+    }
+  }
+
+  return null;
+}
+
 const DATED_KEY_RE = /^(?:usage|sessions):(\d{4}-\d{2}-\d{2})$/;
 
 export function getPruneKeys(keys, retentionDays, today = new Date()) {

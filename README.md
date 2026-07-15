@@ -6,9 +6,10 @@ Chrome extension that tracks how much time you spend on each website. Data stays
 
 Click the extension icon to see a card-based dashboard of where your time went:
 
-- **Hero card** — total active time for the current view in a big pill
+- **Hero card** — total active time for the current view in a big pill, plus an insight line when there's something worth saying ("Longest focus stretch today: 52m on github.com", "You've opened twitter.com 31 times today", "youtube.com: 40% less than this day last week")
 - **Top 5 Sites** — a donut chart (top 5 domains + Other, total site count in the center) with a legend
-- **Activity list** — every domain sorted by time with a progress bar; the week view adds a 7-day column chart and groups domains by day
+- **Day timeline** — the Today view opens with a horizontal strip of your day: one colored block per continuous visit, hour-aligned axis, hover for domain and clock range
+- **Activity list** — every domain sorted by time with a progress bar and visit count ("47 visits", with average visit length in the tooltip); the week view adds a 7-day column chart and groups domains by day
 
 The footer's **This Week** button switches between Today and last-7-days views.
 
@@ -54,7 +55,9 @@ All data lives in `chrome.storage.local`. Daily usage is stored under keys like 
 }
 ```
 
-Values are in milliseconds. The current in-progress session is stored as `currentSession`:
+Values are in milliseconds. Alongside the totals, each day keeps a session log under `sessions:YYYY-MM-DD` — an array of `[startMs, durationMs, domain]` triples, one per continuous visit (checkpoint chunks are coalesced back together, capped at 1000 entries/day). The log powers the timeline, visit counts, and insights, and is covered by the same retention pruning, Clear History, and JSON export as the daily totals.
+
+The current in-progress session is stored as `currentSession`:
 
 ```json
 {

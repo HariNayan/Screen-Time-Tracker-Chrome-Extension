@@ -1,4 +1,4 @@
-import { getDay as getDayKey, formatTime, escapeHtml, groupByBaseDomain, getBaseDomain, domainHue, computeVisits, toCsv } from './lib.js';
+import { getDay as getDayKey, formatTime, escapeHtml, groupByBaseDomain, getBaseDomain, domainHue, computeVisits, pickInsight, toCsv } from './lib.js';
 import { SLEEP_CAP_MS, appendToLog } from './session.js';
 
 let currentView = 'today';
@@ -115,10 +115,17 @@ function buildDisplayLog(result, settings, todayKey) {
   return log.map(([start, duration, domain]) => [start, duration, getBaseDomain(domain)]);
 }
 
+function getLastWeekDayKey() {
+  const d = new Date();
+  d.setDate(d.getDate() - 7);
+  return getDayKey(d);
+}
+
 async function getData() {
   const days = currentView === 'today' ? [getDayKey(new Date())] : getLast7Days();
   const keys = days.map((day) => `usage:${day}`).concat(['currentSession', 'settings']);
-  if (currentView === 'today') keys.push(`sessions:${days[0]}`);
+  const lastWeekKey = `usage:${getLastWeekDayKey()}`;
+  if (currentView === 'today') keys.push(`sessions:${days[0]}`, lastWeekKey);
 
   return new Promise((resolve, reject) => {
     chrome.storage.local.get(keys, (result) => {
@@ -136,10 +143,13 @@ async function getData() {
       };
 
       if (currentView === 'today') {
+        let lastWeek = result[lastWeekKey] || {};
+        if (settings.groupSubdomains) lastWeek = groupByBaseDomain(lastWeek);
         resolve({
           type: 'single',
           data: transform(result[`usage:${days[0]}`] || {}, days[0]),
           log: buildDisplayLog(result, settings, days[0]),
+          lastWeek,
           liveDomain
         });
       } else {
@@ -374,7 +384,13 @@ function renderTopSites(data) {
   `);
 }
 
-function renderSingleDay(data, liveDomain, log) {
+function setInsight(text) {
+  const el = document.getElementById('insight');
+  el.hidden = !text;
+  if (text && el.textContent !== text) el.textContent = text;
+}
+
+function renderSingleDay(data, liveDomain, log, lastWeek) {
   const entries = Object.entries(data).sort((a, b) => b[1] - a[1]);
   const totalMs = entries.reduce((sum, [, time]) => sum + time, 0);
 
@@ -384,6 +400,7 @@ function renderSingleDay(data, liveDomain, log) {
   setText('date-range', getDayKey(new Date()));
 
   renderTopSites(data);
+  setInsight(pickInsight({ log, today: data, lastWeek }));
 
   if (entries.length === 0) {
     setHtml('domain-list', EMPTY_STATE_HTML);
@@ -466,6 +483,7 @@ function renderWeekData(weekData, liveDomain) {
   setText('hero-title', "This Week's Activity");
   setText('total-time', formatTime(totalMs));
   setText('list-title', 'Daily Breakdown');
+  setInsight(null);
 
   const start = new Date();
   start.setDate(start.getDate() - 6);
@@ -485,7 +503,7 @@ async function refresh() {
   try {
     const result = await getData();
     if (result.type === 'single') {
-      renderSingleDay(result.data, result.liveDomain, result.log);
+      renderSingleDay(result.data, result.liveDomain, result.log, result.lastWeek);
     } else {
       renderWeekData(result.data, result.liveDomain);
     }

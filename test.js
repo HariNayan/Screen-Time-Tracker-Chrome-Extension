@@ -8,7 +8,10 @@ import {
   groupByBaseDomain,
   isExcluded,
   domainHue,
-  toCsv
+  toCsv,
+  computeVisits,
+  longestSession,
+  pickInsight
 } from './lib.js';
 import {
   createSessionManager,
@@ -420,6 +423,68 @@ console.log('\n=== getPruneKeys() ===');
   assert('expired session logs pruned too', getPruneKeys(['sessions:2026-04-15', 'sessions:2026-07-14'], 90, today), ['sessions:2026-04-15']);
   assert('non-usage keys never pruned', getPruneKeys(['settings', 'currentSession'], 1, today), []);
   assert('malformed usage key kept', getPruneKeys(['usage:not-a-date'], 90, today), []);
+}
+
+console.log('\n=== computeVisits() ===');
+{
+  const log = [
+    [1000, 60000, 'a.com'],
+    [70000, 30000, 'b.com'],
+    [110000, 90000, 'a.com']
+  ];
+  assert('counts and sums per domain', computeVisits(log), {
+    'a.com': { count: 2, totalMs: 150000 },
+    'b.com': { count: 1, totalMs: 30000 }
+  });
+  assert('empty log', computeVisits([]), {});
+}
+
+console.log('\n=== longestSession() ===');
+{
+  const log = [[0, 60000, 'a.com'], [70000, 300000, 'b.com'], [400000, 5000, 'c.com']];
+  assert('finds longest entry', longestSession(log), [70000, 300000, 'b.com']);
+  assert('empty log returns null', longestSession([]), null);
+}
+
+console.log('\n=== pickInsight() ===');
+{
+  const MIN = 60000;
+  const focusLog = [[0, 30 * MIN, 'github.com'], [31 * MIN, 2 * MIN, 'twitter.com']];
+  assert('focus stretch rule',
+    pickInsight({ log: focusLog, today: {}, lastWeek: {} }),
+    'Longest focus stretch today: 30m on github.com');
+
+  const habitLog = [];
+  for (let i = 0; i < 25; i++) habitLog.push([i * 5 * MIN, 40 * 1000, 'twitter.com']);
+  assert('checking habit rule',
+    pickInsight({ log: habitLog, today: {}, lastWeek: {} }),
+    "You've opened twitter.com 25 times today");
+
+  assert('focus stretch beats habit',
+    pickInsight({ log: focusLog.concat(habitLog), today: {}, lastWeek: {} }),
+    'Longest focus stretch today: 30m on github.com');
+
+  assert('upward trend rule',
+    pickInsight({ log: [], today: { 'youtube.com': 60 * MIN }, lastWeek: { 'youtube.com': 30 * MIN } }),
+    'youtube.com: 100% more than this day last week');
+
+  assert('downward trend rule',
+    pickInsight({ log: [], today: { 'youtube.com': 15 * MIN }, lastWeek: { 'youtube.com': 60 * MIN } }),
+    'youtube.com: 75% less than this day last week');
+
+  assert('small change stays silent',
+    pickInsight({ log: [], today: { 'youtube.com': 33 * MIN }, lastWeek: { 'youtube.com': 30 * MIN } }),
+    null);
+
+  assert('trend needs both days above threshold',
+    pickInsight({ log: [], today: { 'youtube.com': 9 * MIN }, lastWeek: { 'youtube.com': 3 * MIN } }),
+    null);
+
+  assert('nothing to say returns null',
+    pickInsight({ log: [[0, 2 * MIN, 'a.com']], today: { 'a.com': 2 * MIN }, lastWeek: {} }),
+    null);
+
+  assert('no inputs returns null', pickInsight(), null);
 }
 
 console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
