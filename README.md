@@ -2,6 +2,30 @@
 
 Chrome extension that tracks how much time you spend on each website. Data stays on your machine — no accounts, no servers, no network requests.
 
+## Screenshots
+
+<!--
+  Add your screenshots to the screenshots/ folder using the filenames below
+  and they will appear here automatically. Suggested capture size: the popup
+  is 360px wide — screenshot it at 100% zoom for crisp images.
+-->
+
+| Today view | This Week view |
+|:---:|:---:|
+| ![Today view — hero card, donut, timeline, and activity list](screenshots/today-view.png) | ![This Week view — weekly total, 7-day chart, and daily breakdown](screenshots/week-view.png) |
+
+| Dark mode | Settings page |
+|:---:|:---:|
+| ![Popup in dark mode](screenshots/dark-mode.png) | ![Options page — idle threshold, retention, exclusions](screenshots/options.png) |
+
+## Installation
+
+1. Download or clone this repository
+2. Open `chrome://extensions` in Chrome
+3. Turn on **Developer mode** (top-right toggle)
+4. Click **Load unpacked** and select the project folder
+5. Pin the icon from the puzzle-piece menu — tracking starts immediately
+
 ## What it does
 
 Click the extension icon to see a card-based dashboard of where your time went:
@@ -86,7 +110,7 @@ Values outside the numeric ranges are clamped on save.
 
 The idle threshold uses `chrome.idle.setDetectionInterval()` — the actual Chrome idle detection has a minimum of 15 seconds regardless of what you set.
 
-Pruning runs once a day via a Chrome alarm. It compares each `usage:YYYY-MM-DD` key against the retention cutoff and deletes anything older.
+Pruning runs once a day via a Chrome alarm. It compares each dated key (`usage:YYYY-MM-DD` and `sessions:YYYY-MM-DD`) against the retention cutoff and deletes anything older.
 
 ## Permissions
 
@@ -157,7 +181,7 @@ test.js          Unit tests (run with `node test.js`)
 node test.js
 ```
 
-The tests import the real `lib.js` and `session.js` modules — the same code the extension runs — with a mock storage backend and a fake clock. They cover domain parsing, session switching, checkpoint flushing, midnight splitting, the sleep cap, the 500ms debounce, worker-restart session restore, and pruning.
+The tests import the real `lib.js` and `session.js` modules — the same code the extension runs — with a mock storage backend and a fake clock. They cover domain parsing, session switching, checkpoint flushing, midnight splitting, the sleep cap, the 500ms debounce, worker-restart session restore, pruning, the session log (coalescing, cap, midnight), exclusions, subdomain grouping, CSV export, visit counts, and the insight rules.
 
 
 ```
