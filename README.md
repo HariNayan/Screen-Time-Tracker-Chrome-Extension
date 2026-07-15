@@ -97,7 +97,7 @@ The current in-progress session is stored as `currentSession`:
 
 ## Settings
 
-Right-click the extension icon → Options (or find it in `chrome://extensions`):
+Click the ⚙️ button in the popup (or right-click the extension icon → Options):
 
 | Setting | What it controls | Range | Default |
 |---|---|---|---|

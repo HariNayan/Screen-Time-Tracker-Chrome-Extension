@@ -626,6 +626,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   await applyTheme(theme);
 
   document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
+  document.getElementById('settings-btn').addEventListener('click', () => {
+    chrome.runtime.openOptionsPage();
+  });
 
   setupViewToggle();
   setupExport();

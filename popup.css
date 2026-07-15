@@ -116,10 +116,15 @@ body {
   white-space: nowrap;
 }
 
-.theme-toggle {
+.hero-actions {
   position: absolute;
   top: 10px;
   right: 10px;
+  display: flex;
+  gap: 2px;
+}
+
+.icon-btn {
   width: 30px;
   height: 30px;
   border: none;
@@ -132,8 +137,13 @@ body {
   justify-content: center;
 }
 
-.theme-toggle:hover {
+.icon-btn:hover {
   background: rgba(128, 128, 128, 0.15);
+}
+
+.icon-btn:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
 }
 
 /* ---- cards ---- */
